@@ -1,0 +1,305 @@
+---
+# Auto-detect pwsh; fall back to Windows PowerShell
+- name: Detect PowerShell 7 (pwsh) on target
+  ansible.windows.win_powershell:
+    script: |
+      {% raw %}
+      $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
+      if ($cmd) {
+        $Ansible.Result = @{ found = $true; path = $cmd.Source }
+      } else {
+        $Ansible.Result = @{ found = $false; path = 'powershell.exe' }
+      }
+      $Ansible.Changed = $false
+      {% endraw %}
+  register: _pwsh_check
+
+- name: Choose executable based on detection and preference
+  ansible.builtin.set_fact:
+    fake_cfg_ps_exe: >-
+      {{
+        (_pwsh_check.result.found and (fake_cfg_use_pwsh | default(true)))
+        | ternary(_pwsh_check.result.path, 'powershell.exe')
+      }}
+
+# Ensure base paths exist, if requested
+- name: Ensure each target path exists (optional)
+  ansible.windows.win_file:
+    path: "{{ item }}"
+    state: directory
+  loop: "{{ fake_cfg_paths }}"
+  when: fake_cfg_create_path
+
+# Optional purge before (re)creating files
+- name: Purge existing files before recreation (per path)
+  ansible.windows.win_powershell:
+    executable: "{{ fake_cfg_ps_exe }}"
+    script: |
+      {% raw %}
+      Param(
+        [string]$Path,
+        [string[]]$Exts,
+        [ValidateSet('matching','all')]
+        [string]$Mode = 'matching'
+      )
+      if (-not (Test-Path -LiteralPath $Path)) { return }
+
+      if ($Mode -eq 'all') {
+        # Remove everything inside the path, keep the root
+        Get-ChildItem -LiteralPath $Path -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+      } else {
+        # Remove only config-like files
+        Get-ChildItem -LiteralPath $Path -Recurse -File -Force |
+          Where-Object {
+            ($_.Name -match '^(config|cfg|settings)') -or
+            ($Exts -contains $_.Extension.Trim('.').ToLower())
+          } | Remove-Item -Force -ErrorAction SilentlyContinue
+      }
+      {% endraw %}
+    parameters:
+      Path: "{{ item }}"
+      Exts: "{{ fake_cfg_extensions }}"
+      Mode: "{{ fake_cfg_force_mode }}"
+  loop: "{{ fake_cfg_paths }}"
+  when: fake_cfg_force
+
+# Create files + optional credential embedding
+- name: Create random fake config files up to the desired count (per path) with optional credentials embedding
+  ansible.windows.win_powershell:
+    executable: "{{ fake_cfg_ps_exe }}"
+    script: |
+      {% raw %}
+      [CmdletBinding()]
+      Param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [int]$Count = 50,
+        [int]$MinKiB = 1,
+        [int]$MaxKiB = 32,
+        [string[]]$Exts = @('ini','yaml','yml','json','xml','conf','properties'),
+        [string[]]$Subdirs = @(),
+        [string]$Prefix = 'config',
+        [string[]]$NamePatterns = @('{{ prefix }}-{{ rand }}.{{ ext }}','{{ prefix }}_{{ rand }}.{{ ext }}','{{ rand }}-{{ prefix }}.{{ ext }}'),
+        [int]$BackDaysMax = 120,
+
+        # Credentials & embedding controls
+        [string]$CredUsername,
+        [string]$CredPassword,
+        [ValidateSet('none','all','count','ratio')]
+        [string]$CredEmbedMode = 'none',
+        [int]$CredEmbedCount = 0,
+        [double]$CredEmbedRatio = 0.0,
+        [string[]]$CredEmbedExts = @('ini','yaml','yml','json','xml','conf','properties'),
+        [string[]]$CredEmbedNameRegexes = @()
+      )
+
+      function New-RandomString([int]$len=8){
+        -join ((48..57)+(97..122) | Get-Random -Count $len | ForEach-Object {[char]$_})
+      }
+
+      function Get-NamePattern($patterns, $prefix, $ext){
+        $rand = New-RandomString 6
+        $pattern = Get-Random -InputObject $patterns
+        $name = $pattern.Replace('{{ prefix }}',$prefix).Replace('{{ rand }}',$rand).Replace('{{ ext }}',$ext)
+        return $name
+      }
+
+      # Build content without here-strings (avoids parser issues)
+      function New-FakeContent([string]$ext, [bool]$includeCreds, [string]$u, [string]$p){
+        switch ($ext.ToLower()) {
+
+          'ini' {
+            $lines = @(
+              '[general]',
+              "name=$(New-RandomString 10)",
+              "enabled=$((Get-Random -InputObject @('true','false')))",
+              "retry=$(Get-Random -Minimum 1 -Maximum 5)",
+              "log_level=$((Get-Random -InputObject @('DEBUG','INFO','WARN','ERROR')))"
+            )
+            if ($includeCreds) { $lines += @("username=$u","password=$p") }
+            return ($lines -join "`r`n")
+          }
+
+          'yaml' {
+            $lines = @(
+              'service:',
+              "  name: $(New-RandomString 12)",
+              "  enabled: $((Get-Random -InputObject @('true','false')))",
+              "  endpoints:",
+              "    - https://api.$((New-RandomString 6)).local/v1",
+              "    - https://cdn.$((New-RandomString 6)).local/assets"
+            )
+            if ($includeCreds) {
+              $lines += @('auth:', "  username: $u", "  password: $p")
+            }
+            return ($lines -join "`r`n")
+          }
+
+          'yml' { return New-FakeContent 'yaml' $includeCreds $u $p }
+
+          'json' {
+            $obj = @{
+              service = @{
+                name    = (New-RandomString 12)
+                enabled = ((Get-Random -InputObject @('true','false')) -eq 'true')
+                retries = (Get-Random -Minimum 1 -Maximum 6)
+                endpoint= "https://api.$((New-RandomString 6)).local/v1"
+              }
+            }
+            if ($includeCreds) { $obj['auth'] = @{ username = $u; password = $p } }
+            return ($obj | ConvertTo-Json -Depth 5)
+          }
+
+          'xml' {
+            $lines = @(
+              '<settings>',
+              "  <name>$(New-RandomString 10)</name>",
+              "  <enabled>$((Get-Random -InputObject @('true','false')))</enabled>",
+              "  <timeout>$(Get-Random -Minimum 5 -Maximum 60)</timeout>"
+            )
+            if ($includeCreds) {
+              $lines += "  <auth><username>$([System.Security.SecurityElement]::Escape($u))</username><password>$([System.Security.SecurityElement]::Escape($p))</password></auth>"
+            }
+            $lines += '</settings>'
+            return ($lines -join "`r`n")
+          }
+
+          'conf' {
+            $lines = @(
+              "name=$(New-RandomString 10)",
+              "enabled=$((Get-Random -InputObject @('true','false')))",
+              "endpoint=https://srv.$((New-RandomString 5)).lan"
+            )
+            if ($includeCreds) { $lines += @("username=$u","password=$p") }
+            return ($lines -join "`r`n")
+          }
+
+          'properties' {
+            $lines = @(
+              "app.name=$(New-RandomString 10)",
+              "app.enabled=$((Get-Random -InputObject @('true','false')))",
+              "app.retries=$(Get-Random -Minimum 1 -Maximum 6)"
+            )
+            if ($includeCreds) { $lines += @("auth.username=$u","auth.password=$p") }
+            return ($lines -join "`r`n")
+          }
+
+          default {
+            if ($includeCreds) { return "username=$u`r`npassword=$p" }
+            else { return "name=$(New-RandomString 8)" }
+          }
+        }
+      }
+
+      # Ensure base/subdirs
+      if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+      foreach ($sd in $Subdirs) {
+        $p = Join-Path $Path $sd
+        if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+      }
+
+      # Count existing config-like files
+      $existing = Get-ChildItem -LiteralPath $Path -Recurse -File |
+        Where-Object { $Exts -contains $_.Extension.Trim('.').ToLower() }
+
+      $toCreate = [Math]::Max(0, $Count - $existing.Count)
+      if ($toCreate -le 0) {
+        $Ansible.Changed = $false
+        return
+      }
+
+      # Decide which of the new files will get creds
+      $embedIndices = [System.Collections.Generic.HashSet[int]]::new()
+      $targetEmbed = 0
+      if ($CredEmbedMode -eq 'all') {
+        $targetEmbed = $toCreate
+      } elseif ($CredEmbedMode -eq 'count') {
+        $targetEmbed = [Math]::Min($CredEmbedCount, $toCreate)
+      } elseif ($CredEmbedMode -eq 'ratio') {
+        $targetEmbed = [Math]::Min([Math]::Round($toCreate * $CredEmbedRatio), $toCreate)
+      }
+      while ($embedIndices.Count -lt $targetEmbed) {
+        [void]$embedIndices.Add( (Get-Random -Minimum 0 -Maximum $toCreate) )
+      }
+
+      function Should-ForceEmbedByName([string]$name, [string[]]$regexes){
+        foreach($rx in $regexes){ if ($name -match $rx) { return $true } }
+        return $false
+      }
+
+      $created = @()
+      for ($i=0; $i -lt $toCreate; $i++){
+        $ext = Get-Random -InputObject $Exts
+        $targetDir = if ($Subdirs.Count -gt 0) { Join-Path $Path (Get-Random -InputObject $Subdirs) } else { $Path }
+        $name = Get-NamePattern $NamePatterns $Prefix $ext
+        $filePath = Join-Path $targetDir $name
+
+        $eligibleForCreds = $CredEmbedExts -contains $ext.ToLower()
+        $includeCreds = $false
+        if ($CredEmbedMode -ne 'none' -and $eligibleForCreds) {
+          if (Should-ForceEmbedByName -name $name -regexes $CredEmbedNameRegexes) {
+            $includeCreds = $true
+          } else {
+            $includeCreds = $embedIndices.Contains($i)
+          }
+        }
+
+        $content = New-FakeContent $ext $includeCreds $CredUsername $CredPassword
+
+        # Pad to approximate size
+        $targetKiB = Get-Random -Minimum $MinKiB -Maximum ($MaxKiB + 1)
+        $bytesNeeded = ($targetKiB * 1024)
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine($content)
+        while ([System.Text.Encoding]::UTF8.GetByteCount($sb.ToString()) -lt $bytesNeeded) {
+          [void]$sb.AppendLine($content)
+        }
+
+        Set-Content -LiteralPath $filePath -Value $sb.ToString() -Encoding UTF8 -Force
+
+        # Random backdate
+        if ($BackDaysMax -gt 0) {
+          $days = Get-Random -Minimum 0 -Maximum ($BackDaysMax + 1)
+          $dt = (Get-Date).AddDays(-$days)
+          (Get-Item -LiteralPath $filePath).CreationTime = $dt
+          (Get-Item -LiteralPath $filePath).LastWriteTime = $dt
+          (Get-Item -LiteralPath $filePath).LastAccessTime = $dt
+        }
+
+        $created += [pscustomobject]@{
+          path = $filePath
+          ext  = $ext
+          creds_embedded = $includeCreds
+        }
+      }
+
+      $Ansible.Result = @{
+        created = $created
+        total_present = (Get-ChildItem -LiteralPath $Path -Recurse -File |
+          Where-Object { $Exts -contains $_.Extension.Trim('.').ToLower() }).Count
+      }
+      $Ansible.Changed = $true
+      {% endraw %}
+    parameters:
+      Path: "{{ item }}"
+      Count: "{{ fake_cfg_count }}"
+      MinKiB: "{{ fake_cfg_min_kib }}"
+      MaxKiB: "{{ fake_cfg_max_kib }}"
+      Exts: "{{ fake_cfg_extensions }}"
+      Subdirs: "{{ fake_cfg_subdirs }}"
+      Prefix: "{{ fake_cfg_prefix }}"
+      NamePatterns: "{{ fake_cfg_name_patterns }}"
+      BackDaysMax: "{{ fake_cfg_date_back_days_max }}"
+      CredUsername: "{{ fake_cfg_credentials.username | default('') }}"
+      CredPassword: "{{ fake_cfg_credentials.password | default('') }}"
+      CredEmbedMode: "{{ fake_cfg_creds_embed_mode }}"
+      CredEmbedCount: "{{ fake_cfg_creds_embed_count }}"
+      CredEmbedRatio: "{{ fake_cfg_creds_embed_ratio }}"
+      CredEmbedExts: "{{ fake_cfg_creds_embed_exts }}"
+      CredEmbedNameRegexes: "{{ fake_cfg_creds_embed_names }}"
+  loop: "{{ fake_cfg_paths }}"
+  register: fake_cfg_results
+
+- name: Show per-path summary
+  ansible.builtin.debug:
+    var: fake_cfg_results.results | map(attribute='result') | list
+

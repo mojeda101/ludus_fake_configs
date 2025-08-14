@@ -1,0 +1,57 @@
+---
+# === Targets ===
+# One or more paths to populate. Each path can be created automatically.
+fake_cfg_paths:
+  - 'C:\shares\all'
+  - 'C:\shares\public'
+# Ensure target paths exist
+fake_cfg_create_path: true
+
+# Prefer PowerShell 7 if installed (falls back otherwise)
+fake_cfg_use_pwsh: false
+
+# === Generation knobs ===
+fake_cfg_count: 50                # total files to end up with (per path; idempotent unless forced)
+fake_cfg_extensions:              # pool of extensions to generate
+  - ini
+  - yaml
+  - yml
+  - json
+  - xml
+  - conf
+  - properties
+fake_cfg_min_kib: 1               # approximate size range (KiB)
+fake_cfg_max_kib: 32
+fake_cfg_subdirs: ["app", "services", "agents", "drivers", "development","configs"]   # optional subfolders; [] for none
+fake_cfg_prefix: "config"
+# File name patterns (tokens are literal text, handled inside PowerShell)
+# tokens: {{ prefix }}, {{ rand }}, {{ ext }}
+fake_cfg_name_patterns:
+  - !unsafe "{{ prefix }}-{{ rand }}.{{ ext }}"
+  - !unsafe "{{ prefix }}_{{ rand }}.{{ ext }}"
+  - !unsafe "{{ rand }}-{{ prefix }}.{{ ext }}"
+fake_cfg_date_back_days_max: 120  # random backdating (0 disables)
+
+# === Force/purge behavior ===
+fake_cfg_force: true             # true = purge first, then recreate
+# matching: delete only files that look like our fake configs
+# all     : delete EVERYTHING under each path before recreating
+fake_cfg_force_mode: "matching"
+
+# === Credentials embedding ===
+fake_cfg_credentials:
+  username: "svc_labuser"
+  password: "P@ssw0rd!123"
+
+# How to embed creds:
+#   none  : never embed
+#   all   : embed in every new file (if ext eligible)
+#   count : embed in exactly N new files per path
+#   ratio : embed in about ratio*toCreate files per path
+fake_cfg_creds_embed_mode: "ratio"
+fake_cfg_creds_embed_count: 50
+fake_cfg_creds_embed_ratio: 0.1
+fake_cfg_creds_embed_exts: ['ini','yaml','yml','json','xml','conf','properties']
+# Filenames matching any of these regexes (case-insensitive suggested) will ALWAYS get creds (if ext eligible)
+fake_cfg_creds_embed_names: ['(?i)credential', '(?i)auth', '(?i)login', '(?i)secrets?']
+
