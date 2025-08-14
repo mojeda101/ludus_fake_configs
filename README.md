@@ -13,7 +13,7 @@ Creates random, fake configuration files on **Windows** across one or more paths
 >  - 'C:\shares\all'
 >  - 'C:\shares\public'
 
-The orginaly created to use with [ludus-ad-vulns](https://github.com/Primusinterp/ludus-ad-vulns/tree/main). I found the created open share nice but empty.
+Originaly created to use with [ludus-ad-vulns](https://github.com/Primusinterp/ludus-ad-vulns/tree/main). I found the created shares nice but empty.
 
 
 ## Role Variables
