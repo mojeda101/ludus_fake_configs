@@ -7,7 +7,7 @@ Creates random, fake configuration files on **Windows** across one or more paths
 > If you set `fake_cfg_force: true ` true = purge first, then recreate files (Default=true).
 > The repo was basically fast vibe coded so check if its works for you.
 
-> [!INFO]
+> [!NOTE]
 > The current default path are:
 > fake_cfg_paths:
 >  - 'C:\shares\all'
